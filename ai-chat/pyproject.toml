@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aichat"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "byksdk>=0.1.0,<0.2.0",
+    "openai>=1.0.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
+]
