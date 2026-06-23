@@ -1,0 +1,29 @@
+{
+    "dy":{
+        "install": {
+            "pip": ["https://github.com/fcbyk/pyodd/releases/download/pkg/dy_parsing_download-0.1.0-py3-none-any.whl"]
+        },
+
+        "commands": {
+            "dy":{
+                "type": "py-module",
+                "entry": "dyparsing",
+                "desc": "抖音视频解析和下载"
+            }
+        }
+    },
+
+    "ai":{
+        "install": {
+            "pip": ["https://github.com/fcbyk/pyodd/releases/download/pkg/aichat-0.1.0-py3-none-any.whl"]
+        },
+
+        "commands": {
+            "ai":{
+                "type": "py-module",
+                "entry": "aichat",
+                "desc": "在终端和AI聊天"
+            }
+        }
+    }
+}
