@@ -1,7 +1,7 @@
 {
     "dy":{
         "install": {
-            "pip": ["https://github.com/fcbyk/pyodd/releases/download/pkg/dy_parsing_download-0.1.0-py3-none-any.whl"]
+            "pip": ["https://github.com/fcbyk/pyodd/releases/download/pkg/dy_parsing_download-0.1.1-py3-none-any.whl"]
         },
 
         "commands": {
