@@ -13,6 +13,9 @@ dependencies = [
     "click>=8.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["dyparsing*"]
+
 [tool.setuptools.package-data]
 dyparsing = ["douyin/config.yaml"]
 
