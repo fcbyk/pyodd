@@ -1,25 +1,43 @@
 {
-    "ai":{
-        "install": {
-            "pip": ["https://github.com/fcbyk/pyodd/releases/download/pkg/aichat-0.1.0-py3-none-any.whl"]
-        },
-
-        "commands": {
-            "ai":{
-                "type": "py-module",
-                "entry": "aichat",
-                "desc": "在终端和AI聊天"
-            }
-        }
+  "ai": {
+    "install": {
+      "pip": [
+        "https://github.com/fcbyk/pyodd/releases/download/pkg/aichat-0.1.0-py3-none-any.whl"
+      ]
     },
 
-    "jiahao":{
-        "commands": {
-            "jiahao":{
-                "type": "py-script",
-                "entry": "https://raw.githubusercontent.com/fcbyk/pyodd/refs/heads/main/scripts/jiahao.py",
-                "desc": "zhuang x commands"
-            }
-        }
+    "commands": {
+      "ai": {
+        "type": "py-module",
+        "entry": "aichat",
+        "desc": "在终端和AI聊天"
+      }
     }
+  },
+
+  "jiahao": {
+    "install": {
+      "pip": ["click", "rich"]
+    },
+    "commands": {
+      "jiahao": {
+        "type": "py-script",
+        "entry": "https://raw.githubusercontent.com/fcbyk/pyodd/refs/heads/main/scripts/jiahao.py",
+        "desc": "zhuang x commands"
+      }
+    }
+  },
+
+  "popup": {
+    "install": {
+      "pip": ["click"]
+    },
+    "commands": {
+      "popup": {
+        "type": "py-script",
+        "entry": "https://raw.githubusercontent.com/fcbyk/pyodd/refs/heads/main/scripts/popup.py",
+        "desc": "Display multiple popup windows"
+      }
+    }
+  }
 }
