@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>手势数字识别</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    video {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      /* 镜像翻转，让用户体验更自然 */
+      transform: scaleX(-1);
+    }
+
+    #particleCanvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="particleCanvas"></canvas>
+
+  <script type="module">
+    import { HandLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3';
+
+    /* ================================================================
+     *  手势识别常量
+     * ================================================================ */
+
+    const CONSECUTIVE_FRAMES = 5;
+    const CONFIDENCE_THRESHOLD = 0.7;
+
+    /* ================================================================
+     *  粒子系统常量
+     * ================================================================ */
+
+    /** 粒子总数 */
+    const PARTICLE_COUNT = 500;
+    /** 粒子基础大小（px） */
+    const PARTICLE_BASE_SIZE = 4;
+    /** 粒子动画插值速度（0-1，越大越快） */
+    const LERP_SPEED = 0.06;
+    /** 散开时粒子飞出的最小距离（相对于屏幕的倍数） */
+    const SCATTER_DISTANCE = 1.5;
+    /** 粒子颜色：白色 */
+    const PARTICLE_COLOR = '255, 255, 255';
+
+    /**
+     * MediaPipe 手部关键点索引
+     * 0:  手腕      1:  拇指 CMC   2:  拇指 MCP   3:  拇指 IP
+     * 4:  拇指指尖  5:  食指 MCP   6:  食指 PIP   7:  食指 DIP
+     * 8:  食指指尖  9:  中指 MCP  10:  中指 PIP  11:  中指 DIP
+     * 12: 中指指尖 13: 无名指 MCP 14: 无名指 PIP 15: 无名指 DIP
+     * 16: 无名指指尖 17: 小指 MCP 18: 小指 PIP  19: 小指 DIP
+     * 20: 小指指尖
+     */
+    const WRIST = 0;
+    const THUMB_TIP = 4;
+    const THUMB_IP = 3;
+    const THUMB_MCP = 2;
+    const INDEX_TIP = 8;
+    const INDEX_PIP = 6;
+    const INDEX_MCP = 5;
+    const MIDDLE_TIP = 12;
+    const MIDDLE_PIP = 10;
+    const MIDDLE_MCP = 9;
+    const RING_TIP = 16;
+    const RING_PIP = 14;
+    const RING_MCP = 13;
+    const PINKY_TIP = 20;
+    const PINKY_PIP = 18;
+    const PINKY_MCP = 17;
+
+    /* ================================================================
+     *  全局状态
+     * ================================================================ */
+
+    let handLandmarker = null;
+    let video = null;
+    let animationFrameId = null;
+
+    /** 当前连续出现的候选手势编号 */
+    let candidateGesture = null;
+    /** 候选手势已连续出现的帧数 */
+    let gestureFrameCount = 0;
+    /** 当前屏幕上显示的数字 */
+    let displayedNumber = null;
+
+    /* ================================================================
+     *  粒子系统状态
+     * ================================================================ */
+
+    let particleCanvas = null;
+    let particleCtx = null;
+    let particles = [];
+    /** 粒子当前动画模式：'scatter' 散开 | 'gather' 聚合 */
+    let particleMode = 'scatter';
+
+    /* ================================================================
+     *  工具函数
+     * ================================================================ */
+
+    function distance(a, b) {
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    /* ================================================================
+     *  手指伸直判定
+     * ================================================================ */
+
+    /**
+     * 通过骨节夹角判断手指是否伸直
+     * 计算 MCP→PIP 与 PIP→TIP 两段骨节向量之间的夹角余弦
+     * 伸直时两段方向一致（cos≈1），弯曲时方向偏离（cos小）
+     */
+    function isFingerStraight(landmarks, tipIdx, pipIdx, mcpIdx) {
+      const mcp = landmarks[mcpIdx];
+      const pip = landmarks[pipIdx];
+      const tip = landmarks[tipIdx];
+
+      const v1x = pip.x - mcp.x;
+      const v1y = pip.y - mcp.y;
+      const v2x = tip.x - pip.x;
+      const v2y = tip.y - pip.y;
+
+      const mag1 = Math.sqrt(v1x * v1x + v1y * v1y);
+      const mag2 = Math.sqrt(v2x * v2x + v2y * v2y);
+
+      if (mag1 === 0 || mag2 === 0) return false;
+
+      const cosAngle = (v1x * v2x + v1y * v2y) / (mag1 * mag2);
+      return cosAngle > 0.7;
+    }
+
+    function isThumbStraight(landmarks) {
+      return isFingerStraight(landmarks, THUMB_TIP, THUMB_IP, THUMB_MCP);
+    }
+
+    /* ================================================================
+     *  手势识别
+     * ================================================================ */
+
+    /**
+     * 根据手部关键点识别手势对应的数字（1-5）
+     * 手势规则：1 食指  /  2 剪刀手  /  3 中间三指  /  4 四指  /  5 五指
+     */
+    function recognizeGesture(landmarks) {
+      const indexStraight = isFingerStraight(landmarks, INDEX_TIP, INDEX_PIP, INDEX_MCP);
+      const middleStraight = isFingerStraight(landmarks, MIDDLE_TIP, MIDDLE_PIP, MIDDLE_MCP);
+      const ringStraight = isFingerStraight(landmarks, RING_TIP, RING_PIP, RING_MCP);
+      const pinkyStraight = isFingerStraight(landmarks, PINKY_TIP, PINKY_PIP, PINKY_MCP);
+      const thumbStraight = isThumbStraight(landmarks);
+
+      // 手势 5：五指全伸
+      if (indexStraight && middleStraight && ringStraight && pinkyStraight && thumbStraight) {
+        return 5;
+      }
+
+      // 手势 4：四指伸直，拇指弯曲
+      if (indexStraight && middleStraight && ringStraight && pinkyStraight && !thumbStraight) {
+        return 4;
+      }
+
+      // 手势 3：中间三指（食指、中指、无名指）伸直，小指和拇指弯曲
+      if (indexStraight && middleStraight && ringStraight && !pinkyStraight && !thumbStraight) {
+        return 3;
+      }
+
+      // 手势 2：剪刀手（食指 + 中指），其余弯曲
+      if (indexStraight && middleStraight && !ringStraight && !pinkyStraight && !thumbStraight) {
+        return 2;
+      }
+
+      // 手势 1：仅食指竖起，其余弯曲
+      if (indexStraight && !middleStraight && !ringStraight && !pinkyStraight && !thumbStraight) {
+        return 1;
+      }
+
+      return null;
+    }
+
+    /* ================================================================
+     *  手势平滑处理
+     * ================================================================ */
+
+    function processGesture(gesture) {
+      if (gesture === candidateGesture) {
+        gestureFrameCount++;
+        if (gestureFrameCount >= CONSECUTIVE_FRAMES && gesture !== displayedNumber) {
+          updateDisplay(gesture);
+        }
+      } else {
+        candidateGesture = gesture;
+        gestureFrameCount = 1;
+      }
+
+      if (gesture === null && gestureFrameCount >= CONSECUTIVE_FRAMES) {
+        updateDisplay(null);
+      }
+    }
+
+    /* ================================================================
+     *  手部检测与选择
+     * ================================================================ */
+
+    function getHandArea(landmarks) {
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+      for (const lm of landmarks) {
+        if (lm.x < minX) minX = lm.x;
+        if (lm.y < minY) minY = lm.y;
+        if (lm.x > maxX) maxX = lm.x;
+        if (lm.y > maxY) maxY = lm.y;
+      }
+      return (maxX - minX) * (maxY - minY);
+    }
+
+    function selectBestHand(results) {
+      if (!results || !results.landmarks || results.landmarks.length === 0) return null;
+
+      const handednessList = results.handednesses || results.handedness;
+      if (!handednessList || handednessList.length === 0) return null;
+
+      let bestLandmarks = null;
+      let bestArea = 0;
+
+      for (let i = 0; i < results.landmarks.length; i++) {
+        const handedness = handednessList[i];
+        if (!handedness || !handedness[0]) continue;
+
+        const score = handedness[0].score;
+        if (score < CONFIDENCE_THRESHOLD) continue;
+
+        const area = getHandArea(results.landmarks[i]);
+        if (area > bestArea) {
+          bestArea = area;
+          bestLandmarks = results.landmarks[i];
+        }
+      }
+
+      return bestLandmarks;
+    }
+
+    /* ================================================================
+     *  粒子系统
+     * ================================================================ */
+
+    /**
+     * 初始化粒子画布和粒子数组
+     */
+    function initParticles() {
+      particleCanvas = document.getElementById('particleCanvas');
+      particleCtx = particleCanvas.getContext('2d');
+      resizeParticleCanvas();
+
+      // 创建粒子，初始随机分布在屏幕上
+      particles = [];
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const x = Math.random() * particleCanvas.width;
+        const y = Math.random() * particleCanvas.height;
+        particles.push({
+          x, y,
+          targetX: x,
+          targetY: y,
+          size: Math.random() * PARTICLE_BASE_SIZE + 1,
+          opacity: 0.5 + Math.random() * 0.5
+        });
+      }
+
+      window.addEventListener('resize', resizeParticleCanvas);
+    }
+
+    /**
+     * 响应窗口大小变化，调整画布尺寸
+     */
+    function resizeParticleCanvas() {
+      particleCanvas.width = window.innerWidth;
+      particleCanvas.height = window.innerHeight;
+    }
+
+    /**
+     * 通过离屏 Canvas 渲染数字文字，采样像素生成粒子聚合目标位置
+     * @param {number} number - 要渲染的数字
+     * @returns {Array<{x: number, y: number}>} 目标位置数组
+     */
+    function generateTextTargets(number) {
+      // 离屏 Canvas 尺寸
+      const offWidth = 400;
+      const offHeight = 400;
+      const offCanvas = new OffscreenCanvas(offWidth, offHeight);
+      const offCtx = offCanvas.getContext('2d');
+
+      // 绘制数字文字
+      offCtx.fillStyle = '#ffffff';
+      offCtx.font = 'bold 260px Arial, Helvetica Neue, sans-serif';
+      offCtx.textAlign = 'center';
+      offCtx.textBaseline = 'middle';
+      offCtx.fillText(String(number), offWidth / 2, offHeight / 2);
+
+      // 获取像素数据
+      const imageData = offCtx.getImageData(0, 0, offWidth, offHeight);
+      const pixels = imageData.data;
+
+      // 采样属于文字的所有像素位置
+      const rawPoints = [];
+      const step = 3; // 每隔 N 像素采样，控制密度
+      for (let py = 0; py < offHeight; py += step) {
+        for (let px = 0; px < offWidth; px += step) {
+          const alpha = pixels[(py * offWidth + px) * 4 + 3];
+          if (alpha > 128) {
+            rawPoints.push({ x: px, y: py });
+          }
+        }
+      }
+
+      if (rawPoints.length === 0) return [];
+
+      // 将离屏坐标映射到屏幕中心，同时保持文字比例
+      const scaleX = particleCanvas.width / offWidth;
+      const scaleY = particleCanvas.height / offHeight;
+      const scale = Math.min(scaleX, scaleY) * 0.9; // 缩放 90% 留边距
+      const offsetX = (particleCanvas.width - offWidth * scale) / 2;
+      const offsetY = (particleCanvas.height - offHeight * scale) / 2;
+
+      const targets = rawPoints.map(p => ({
+        x: p.x * scale + offsetX,
+        y: p.y * scale + offsetY
+      }));
+
+      // 从采样点中随机均匀选取 PARTICLE_COUNT 个作为目标位置
+      return shuffleAndPick(targets, PARTICLE_COUNT);
+    }
+
+    /**
+     * 生成散开目标位置
+     * 每个粒子以屏幕中心为原点，沿径向向外飞出
+     * @returns {Array<{x: number, y: number}>}
+     */
+    function generateScatterTargets() {
+      const cx = particleCanvas.width / 2;
+      const cy = particleCanvas.height / 2;
+      const maxDist = Math.max(cx, cy) * SCATTER_DISTANCE;
+
+      const targets = [];
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const angle = (i / PARTICLE_COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+        const radius = maxDist * (0.5 + Math.random() * 0.5);
+        targets.push({
+          x: cx + Math.cos(angle) * radius,
+          y: cy + Math.sin(angle) * radius
+        });
+      }
+      return targets;
+    }
+
+    /**
+     * 随机打乱数组并取前 N 个元素
+     */
+    function shuffleAndPick(arr, n) {
+      const result = [...arr];
+      for (let i = result.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [result[i], result[j]] = [result[j], result[i]];
+      }
+      return result.slice(0, n);
+    }
+
+    /**
+     * 设置粒子动画目标
+     * @param {'gather'|'scatter'} mode - 动画模式
+     * @param {number|null} number - 聚合时显示的数字，散开时传 null
+     */
+    function setParticleTargets(mode, number) {
+      let targets;
+      if (mode === 'gather' && number !== null) {
+        targets = generateTextTargets(number);
+        // 如果文字采样失败，回退到散开
+        if (targets.length === 0) {
+          mode = 'scatter';
+          targets = generateScatterTargets();
+        }
+      } else {
+        targets = generateScatterTargets();
+      }
+
+      // 为每个粒子分配目标位置
+      for (let i = 0; i < particles.length; i++) {
+        if (i < targets.length) {
+          particles[i].targetX = targets[i].x;
+          particles[i].targetY = targets[i].y;
+        } else {
+          // 多余粒子随机分布
+          particles[i].targetX = Math.random() * particleCanvas.width;
+          particles[i].targetY = Math.random() * particleCanvas.height;
+        }
+      }
+
+      particleMode = mode;
+    }
+
+    /**
+     * 更新粒子位置（lerp 插值平滑过渡）
+     */
+    function updateParticles() {
+      for (const p of particles) {
+        p.x += (p.targetX - p.x) * LERP_SPEED;
+        p.y += (p.targetY - p.y) * LERP_SPEED;
+      }
+    }
+
+    /**
+     * 渲染粒子到画布
+     */
+    function renderParticles() {
+      particleCtx.clearRect(0, 0, particleCanvas.width, particleCanvas.height);
+
+      for (const p of particles) {
+        // 粒子越接近目标越亮，增强聚合/散开视觉效果
+        const dx = p.targetX - p.x;
+        const dy = p.targetY - p.y;
+        const distToTarget = Math.sqrt(dx * dx + dy * dy);
+        const brightness = particleMode === 'gather'
+          ? Math.max(0.3, 1 - distToTarget / 100)
+          : Math.max(0.2, 0.8 - distToTarget / 200);
+
+        const alpha = p.opacity * brightness;
+        particleCtx.fillStyle = `rgba(${PARTICLE_COLOR}, ${alpha.toFixed(2)})`;
+        particleCtx.beginPath();
+        particleCtx.arc(p.x, p.y, p.size * brightness, 0, Math.PI * 2);
+        particleCtx.fill();
+      }
+    }
+
+    /* ================================================================
+     *  UI 显示
+     * ================================================================ */
+
+    function updateDisplay(number) {
+      if (number === displayedNumber) return;
+
+      if (number === null) {
+        // 数字消失 → 粒子散开
+        setParticleTargets('scatter', null);
+        displayedNumber = null;
+      } else {
+        // 数字出现 → 粒子聚合
+        setParticleTargets('gather', number);
+        displayedNumber = number;
+      }
+    }
+
+    /* ================================================================
+     *  主循环
+     * ================================================================ */
+
+    function predict() {
+      if (!handLandmarker || !video || video.readyState < 2) {
+        animationFrameId = requestAnimationFrame(predict);
+        return;
+      }
+
+      const results = handLandmarker.detectForVideo(video, performance.now());
+      const bestHand = selectBestHand(results);
+
+      if (bestHand) {
+        const gesture = recognizeGesture(bestHand);
+        processGesture(gesture);
+      } else {
+        processGesture(null);
+      }
+
+      // 更新并渲染粒子
+      updateParticles();
+      renderParticles();
+
+      animationFrameId = requestAnimationFrame(predict);
+    }
+
+    /* ================================================================
+     *  初始化
+     * ================================================================ */
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user'
+        }
+      });
+      video.srcObject = stream;
+      await video.play();
+      return video;
+    }
+
+    async function loadHandLandmarker() {
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
+      );
+      return HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numHands: 2
+      });
+    }
+
+    async function main() {
+      video = document.getElementById('video');
+
+      try {
+        initParticles();
+        await setupCamera();
+        handLandmarker = await loadHandLandmarker();
+        predict();
+      } catch (error) {
+        console.error('初始化失败:', error);
+        // 粒子系统初始化失败时，在画布上显示错误提示
+        if (particleCtx) {
+          particleCtx.fillStyle = '#ffffff';
+          particleCtx.font = 'bold 48px Arial';
+          particleCtx.textAlign = 'center';
+          particleCtx.fillText('⚠️', particleCanvas.width / 2, particleCanvas.height / 2);
+        }
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
